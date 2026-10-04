@@ -6,7 +6,7 @@ An open source PearlHash miner under development for the RTX 5060 Ti. This code 
 
 - CUDA 13.0 `sm_120` build succeeds on an RTX 5060 Ti.
 - Offline mock mining builds a Pearl proof and passes the included ZK verifier.
-- On the RTX 5060 Ti, a short LuckyPool run accepted five `plain_proof` shares and the miner reported about 4.7 TH/s after warmup. The small offline mock reports about 2.1 TH/s. Both are far below the historical 91.3 TH/s closed miner baseline; pool acceptance does not establish profitability or a payout.
+- On the RTX 5060 Ti, the warp jackpot kernel reports about 5.5 TH/s after warmup at LuckyPool, up from about 4.7 TH/s before this change. The original run accepted five `plain_proof` shares; the new kernel also passes the full offline proof verifier and has accepted live shares. This remains far below the historical 91.3 TH/s closed miner baseline; pool acceptance does not establish profitability or a payout. See [performance evidence](docs/performance.md).
 - The source contains a transparent 1% project fee routed to the project owner's Pearl wallet. When the mining wallet is the same address, fee switching is disabled. No third party developer fee address is present.
 - The source is public for review and development. Production use needs a faster kernel and a measured whole-system power draw.
 
@@ -34,7 +34,9 @@ The test succeeds only if it reports `verify OK` and `[mock] PASS`. It does not 
 
 ## Live pool check
 
-The five accepted shares used the cuBLAS path with `--row-period-batch 4 --col-period-batch 32` at LuckyPool's Pearl endpoint. The miner was stopped after the short check. Its displayed speed is an internal work-rate estimate, not independently measured earnings. LuckyPool currently advertises a 1% pool fee; confirm the pool terms before mining.
+The accepted shares used the cuBLAS path with `--row-period-batch 4 --col-period-batch 32` at LuckyPool's Pearl endpoint. The miner was stopped after each short check. Its displayed speed is an internal work-rate estimate, not independently measured earnings. LuckyPool currently advertises a 1% pool fee; confirm the pool terms before mining.
+
+Run `ctest --test-dir build/cmake --output-on-failure` for the fee scheduler and CUDA jackpot tests. The latter compares 257 jackpot messages with an independent CPU calculation across 64 cumulative rank steps, including zero, all-one, sequential, and random partials. It is skipped when no CUDA device is available.
 
 ## Fee and attribution
 

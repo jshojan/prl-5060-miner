@@ -1199,8 +1199,9 @@ static void launch_jackpot_batch(
     if(g->use_cutlass_fused)
         return;
 
-    const int num_blocks = pp_batch_hash_tiles(row_batch_count, col_batch_count);
-    const dim3 block(PP_HASH_W, PP_HASH_H);
+    const int num_tiles = pp_batch_hash_tiles(row_batch_count, col_batch_count);
+    const int num_blocks = (num_tiles + 3) / 4;
+    const dim3 block(128);
     plain_proof_period_jackpot_kernel<<<num_blocks, block>>>(
         g->d_C_hist,
         row_batch_count, col_batch_count,

@@ -1,10 +1,11 @@
-/* Per-period cuBLAS GEMM + cooperative 8x16 hash-tile jackpot (reads C_hist). */
+/* Per-period cuBLAS GEMM + warp-local 8x16 hash-tile jackpot (reads C_hist). */
 #ifndef PLAIN_PROOF_PERIOD_CUH
 #define PLAIN_PROOF_PERIOD_CUH
 
 #include "cp_gpu.cuh"
 #include "plain_proof_kernel.cuh"
 #include "cp_config.h"
+#include "pp_reduce.cuh"
 
 #define PP_TILES_PER_PERIOD 256
 #define PP_PERIOD_PLANE_ELEMS (PP_ROW_PERIOD * PP_COL_PERIOD)
@@ -91,7 +92,7 @@ __global__ void plain_proof_period_gemm_kernel(
     }
 }
 
-/* One block per hash tile (8x16 threads); reads C_hist rank partials, one BLAKE3/block. */
+/* Four independent hash tiles per 128-thread block, one warp per tile. */
 __global__ void plain_proof_period_jackpot_kernel(
     const int32_t* __restrict__ C_hist,
     int row_batch_count, int col_batch_count,
@@ -105,12 +106,14 @@ __global__ void plain_proof_period_jackpot_kernel(
     int* __restrict__ out_t_cols,
     int* __restrict__ found_flag)
 {
-    const int blk = (int)blockIdx.x;
+    const int lane = threadIdx.x & 31;
+    const int blk = (int)blockIdx.x * 4 + (threadIdx.x >> 5);
     const int tiles_per_plane = PP_TILES_PER_PERIOD;
     const int planes = row_batch_count * col_batch_count;
     if(blk >= planes * tiles_per_plane) return;
 
-    if(*found_flag) return;
+    /* Keep the early exit uniform within a warp even if another warp wins. */
+    if(__any_sync(0xffffffffu, *found_flag != 0)) return;
 
     const int plane = blk / tiles_per_plane;
     const int tile = blk % tiles_per_plane;
@@ -119,8 +122,7 @@ __global__ void plain_proof_period_jackpot_kernel(
     const int row_period = row_period0 + row_in_batch;
     const int col_period = col_period0 + col_in_batch;
 
-    const int u = (int)threadIdx.y;
-    const int v = (int)threadIdx.x;
+    const int v = lane & 15;
 
     const int local_rp = tile / 16;
     const int local_cp = tile % 16;
@@ -129,44 +131,34 @@ __global__ void plain_proof_period_jackpot_kernel(
     const int t_rows = row_period * PP_ROW_PERIOD + row_base;
     const int t_cols = col_period * PP_COL_PERIOD + col_base;
 
-    const int rel_r = row_in_batch * PP_ROW_PERIOD + row_base + PP_ROW_PAT[u];
     const int rel_c = col_in_batch * PP_COL_PERIOD + col_base + PP_COL_PAT[v];
-    const bool valid = rel_r < M && rel_c < N;
-
-    __shared__ int32_t s_tile[PP_HASH_H * PP_HASH_W];
-    __shared__ uint32_t s_jackpot[PP_JACKPOT_WORDS];
-
-    if(u == 0 && v == 0)
-        for(int i = 0; i < PP_JACKPOT_WORDS; i++) s_jackpot[i] = 0u;
-    s_tile[u * PP_HASH_W + v] = 0;
-    __syncthreads();
-
-    int32_t cell = 0;
+    static_assert(PP_HASH_H * PP_HASH_W == 128 && PP_JACKPOT_WORDS == 16
+                  && PP_LROT == 13, "warp jackpot assumes 128 cells and 16 words");
+    int rel_rows[4];
+    int32_t cells[4] = {};
+    #pragma unroll
+    for(int i = 0; i < 4; ++i)
+        rel_rows[i] = row_in_batch * PP_ROW_PERIOD + row_base + PP_ROW_PAT[(lane >> 4) + 2 * i];
+    uint32_t jackpot_word = 0;
     const int num_steps = K / R;
     for(int step = 0; step < num_steps; step++){
-        if(valid){
-            const int32_t partial = C_hist[
-                pp_c_hist_panel_index(step, rel_r, rel_c,
-                                      row_batch_count, col_batch_count)];
-            cell += partial;
+        uint32_t cell_xor = 0;
+        #pragma unroll
+        for(int i = 0; i < 4; ++i){
+            if(rel_rows[i] < M && rel_c < N)
+                cells[i] += C_hist[pp_c_hist_panel_index(
+                    step, rel_rows[i], rel_c, row_batch_count, col_batch_count)];
+            cell_xor ^= (uint32_t)cells[i];
         }
-        s_tile[u * PP_HASH_W + v] = cell;
-        __syncthreads();
-
-        if(u == 0 && v == 0){
-            uint32_t xored = 0u;
-            for(int i = 0; i < PP_HASH_H * PP_HASH_W; i++)
-                xored ^= (uint32_t)s_tile[i];
-            const int tid = step % PP_JACKPOT_WORDS;
-            s_jackpot[tid] = pp_rotl32(s_jackpot[tid], PP_LROT) ^ xored;
-        }
-        __syncthreads();
+        jackpot_word = pp_warp_jackpot_step(cell_xor, step, jackpot_word);
     }
-
-    if(u != 0 || v != 0) return;
-
     uint32_t msg[PP_JACKPOT_WORDS];
-    for(int i = 0; i < PP_JACKPOT_WORDS; i++) msg[i] = s_jackpot[i];
+    #pragma unroll
+    for(int i = 0; i < PP_JACKPOT_WORDS; i++){
+        const uint32_t word = __shfl_sync(0xffffffffu, jackpot_word, i);
+        if(lane == 0) msg[i] = word;
+    }
+    if(lane != 0) return;
 
     uint32_t digest[8];
     b3_compress64(a_key8, msg, digest);

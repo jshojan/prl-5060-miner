@@ -1293,7 +1293,7 @@ static PeriodBatchTimes profile_period_batch_timed(
         t.gemm_ex_ms = cb.gemm_ex_ms;
     } else
 #endif
-    if(!g->use_cutlass_fused) {
+    if(!g->use_cutlass_fused && !g_tensor_fused) {
         CU_CHECK(cudaEventRecord(ev[0]));
         gpu_period_gemm_cuda_batch(
             g, m, n, rpi0, cpi0, row_batch_count, col_batch_count);
@@ -1310,7 +1310,7 @@ static PeriodBatchTimes profile_period_batch_timed(
     }
 
     CU_CHECK(cudaEventRecord(ev[1]));
-    if(g->use_cutlass_fused){
+    if(g->use_cutlass_fused || g_tensor_fused){
         t.jackpot_ms = 0.f;
     } else {
         launch_jackpot_batch(
@@ -1450,16 +1450,19 @@ static void scan_profile_print_summary(
            gemm_mode, row_batch_count, col_batch_count, runs);
     printf("[profile-scan] MACs/batch: %.3f GMAC (%.3f TMAC)\n",
            macs_per_batch / 1e9, macs_per_batch / 1e12);
-    printf("[profile-scan] C_hist: %.2f MiB/step x %d steps (partials; cumsum in jackpot)\n",
-           plane_mib, K_DIM / R_RANK);
+    if(!g_tensor_fused)
+        printf("[profile-scan] C_hist: %.2f MiB/step x %d steps (partials; cumsum in jackpot)\n",
+               plane_mib, K_DIM / R_RANK);
     printf("[profile-scan] avg per batch:\n");
-    printf("  gemm_ex:   %7.3f ms  %5.1f%%  %s (16x GemmEx)\n",
+    printf("  %s:   %7.3f ms  %5.1f%%  %s\n",
+           g_tensor_fused ? "fused scan" : "gemm_ex   ",
            gemm_ex_ms, 100.0 * gemm_ex_ms / total_ms, gemm_ex_rate);
-    printf("  jackpot:   %7.3f ms  %5.1f%%  (cumsum partials + BLAKE3)\n",
-           jackpot_ms, 100.0 * jackpot_ms / total_ms);
+    if(!g_tensor_fused)
+        printf("  jackpot:   %7.3f ms  %5.1f%%  (cumsum partials + BLAKE3)\n",
+               jackpot_ms, 100.0 * jackpot_ms / total_ms);
     printf("  sync:      %7.3f ms  %5.1f%%  (DeviceSynchronize + found D2H)\n",
            sync_ms, 100.0 * sync_ms / total_ms);
-    printf("  total:     %7.3f ms  %s (CUDA events, per-step GemmEx sync)\n",
+    printf("  total:     %7.3f ms  %s (CUDA events)\n",
            total_ms, total_rate);
     printf("[profile-scan] production batch (mining launch path, rpi=0):\n");
     printf("  batch:     %7.3f ms/batch  %s\n", wall_ms, wall_rate);
@@ -1561,7 +1564,8 @@ int cp_gpu_run_scan_profile(int dev, int m, int n, int warmup, int runs)
         CU_CHECK(cudaMemcpy(g->d_found, &zero, sizeof(int), cudaMemcpyHostToDevice));
     }
 
-    const char* gemm_mode = g->use_cutlass_fused ? "CUTLASS fused GEMM"
+    const char* gemm_mode = g_tensor_fused ? "tensor fused GEMM + jackpot"
+                            : g->use_cutlass_fused ? "CUTLASS fused GEMM"
                             : (g->use_cublas_period ? "cuBLAS int8 fat"
                                                     : "CUDA period GEMM");
     const int rpi0 = 0;

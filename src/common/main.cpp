@@ -92,7 +92,7 @@ static void print_usage(void)
     printf("  --align-test         run CPU/GPU hash alignment self-test and exit\n");
     printf("  --align-test-prod    include production m=n=%d checks (~1 GiB RAM, slow)\n",
            M_DIM);
-    printf("  --profile-scan [N]   time GEMM vs jackpot per period batch (default N=10)\n");
+    printf("  --profile-scan [N]   time CUDA scan batches and a full sweep (default N=10)\n");
 #endif
 #if defined(CP_ENABLE_OPENCL) && CP_ENABLE_OPENCL
     printf("  --profile-prep [N]   time OpenCL matrix prep phases (default N=3)\n");
@@ -536,8 +536,8 @@ int main(int argc, char** argv)
 
     if(tensor_fused){
         if(cp_worker_backend_id() != CP_BACKEND_CUDA || step_major_ap == 1 ||
-           cutlass_fused == 1 || no_period_gemm || align_test || align_test_prod || profile_scan){
-            fprintf(stderr, "--tensor-fused requires CUDA period GEMM and row-major panels; alignment/profile modes are unsupported\n");
+           cutlass_fused == 1 || no_period_gemm || align_test || align_test_prod){
+            fprintf(stderr, "--tensor-fused requires CUDA period GEMM and row-major panels; alignment modes are unsupported\n");
             return 1;
         }
         g_tensor_fused = 1;

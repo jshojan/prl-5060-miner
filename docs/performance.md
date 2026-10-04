@@ -53,6 +53,14 @@ The isolated 8192² × 4096 CUDA-event scan fell from about 15.0 ms (18.3 TMAC/s
 
 A 32-wide K tile also passed both rank references, but its first isolated scan took 10.45 ms (26.3 TMAC/s). It was slower than the 64-wide candidate and was reverted before production mining.
 
+At the selected 64-wide tile, a two-stage pipeline also passed both rank references. Four alternating timings favored three stages in every pair: two stages took 7.86–8.38 ms, while three took 7.59–8.02 ms. The three-stage build remains selected.
+
+### Fused miner batch size and power
+
+`--profile-scan` now accepts `--tensor-fused` and profiles the actual fused batch and full sweep. The old profile path called the separate unfused GEMM with no output buffer when the tensor flag was enabled; it now dispatches the fused kernel. On production 131072² dimensions, one full sweep measured **29.94 TH/s** at row/column batch 32/256, **32.90 TH/s** at 64/64, **34.39 TH/s** at 128/64, and **35.00 TH/s** at 256/64. Increasing the row batch to 512/64 gave 34.87 TH/s. The smaller 8192² profile rose from 20.10 TH/s at 4/32 to 33.10 TH/s at 64/64. These are profiling sweeps on prepared matrices, not live earnings.
+
+A 45-second LuckyPool run at 256/64 produced 15 full production scans at **34.79 TH/s median** and **12 accepted shares** with no rejected submit response. Thirty-three active one-second GPU samples had **169.64 W median**. Compared with the earlier 4/32 live sample (22.9 TH/s, 105.1 W GPU median), this configuration increases speed but reduces the observed GPU-only work per watt from about 0.218 to 0.205 TH/s/W. The local dashboard therefore retains the conservative 4/32 configuration and 22 TH/s planning rate. Whole-computer power and a positive net return remain unverified.
+
 A 45-second production-size LuckyPool check of the 64-wide kernel had 19 attempt timings; eight full scans (at least 2.5 seconds) had **22.9 TMAC/s median**. The pool returned **11 accepted share responses**, with no rejected response in the captured log. Of 44 one-second GPU telemetry samples, 36 with at least 50% utilization had **105.1 W median**. This excludes the rest of the computer. The root dashboard uses a conservative **22 TH/s** planning rate and remains disarmed pending measured whole-system power and positive net returns. These figures are short-run results, not a payout or sustained earnings record.
 
 A subsequent tuning check compared separate rank GEMMs against `cublasGemmStridedBatchedEx` over three alternating trials. At 4/32 batches the separate path gave 5.35, 5.32, and 5.53 TMAC/s wall sweep rates, versus 5.30, 5.14, and 5.36 for the batched path. At 16/32 both paths were about 5.9 TMAC/s. The batched experiment was removed because it gave no reliable gain. Larger row batches offer a small speed improvement in this small profile, but have not been selected for live operation or checked for whole-system energy efficiency.

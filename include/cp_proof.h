@@ -14,12 +14,14 @@ extern "C" {
  *   2 = CUTLASS Case 10 MMA lane 8x8 interleaved (128x128 CTA, 64 cells/thread)
  *   3 = contiguous 8x8 (8 A rows + 8 B^T rows)
  *   4 = contiguous 4x8 (4 A rows + 8 B^T rows)
+ *   5 = tensor-core lane tile (2 A rows + 32 B^T rows)
  */
 #define CP_TILE_LAYOUT_SCATTERED  0
 #define CP_TILE_LAYOUT_CONTIGUOUS 1
 #define CP_TILE_LAYOUT_CUTLASS    2
 #define CP_TILE_LAYOUT_CONTIGUOUS_8x8 3
 #define CP_TILE_LAYOUT_CONTIGUOUS_4x8 4
+#define CP_TILE_LAYOUT_TENSOR_2x32 5
 
 /* Build plain_proof base64 in-process (Rust/pearl-blake3). Returns 0 on ok, -1 on error.
  * mining_config is retained for ABI compatibility but job_key is derived from tile_layout. */

@@ -34,7 +34,9 @@ build/cmake/tensor_kernel_test --bench
 ctest --test-dir build/cmake --output-on-failure
 ```
 
-Its 2x32 hash pattern (rows `[0,8]`, columns `[0,1,8,9,...,120,121]`) differs from the current miner's 8x16 pattern. Integration must make proof metadata, signal extraction, target scaling, and fee work accounting match that pattern, then pass the full ZK verifier and receive live accepted pool shares. The production miner and dashboard benchmark continue to use the validated 5.5 TH/s path until those gates pass.
+Its 2x32 hash pattern (rows `[0,8]`, columns `[0,1,8,9,...,120,121]`) differs from the current miner's 8x16 pattern. The Rust proof builder now supports layout 5, and independent proof fixtures pass the full ZK verifier for certificate versions 2 and 3 at both interior and boundary anchors. Tests cover all 256 lane anchors, the 262144 target normalization factor, and invalid matrix bounds. The inherited proof fixtures were corrected to use matrix sizes that fit their tiles and valid verification dimensions; the 11-test Rust suite now runs through CTest.
+
+Integration still must connect GPU candidate selection, signal extraction, job configuration, target scaling, and fee work accounting to that pattern, then receive live accepted pool shares. These proof fixtures do not yet verify a share emitted by the fused GPU path. The production miner and dashboard benchmark continue to use the validated 5.5 TH/s path until those gates pass.
 
 ## Correctness and remaining work
 

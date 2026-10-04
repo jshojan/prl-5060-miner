@@ -8,6 +8,7 @@ use mining_config::{mining_config_bytes, validate_tile_anchor};
 use pearl_blake3::{blake3_digest, pad_to_chunk_boundary, MerkleProof, MerkleTree};
 use serde::{Deserialize, Serialize};
 use verify::{jackpot_verify_detail, verify_plain_proof_with_pool_target};
+#[cfg(test)]
 use zk_pow::api::proof::MiningConfiguration;
 
 /// BzMiner production hash tile (8x16 scattered cells within 128x256 period).
@@ -21,6 +22,13 @@ const SCATTERED_COLS: [usize; 16] = [
 const CUTLASS_ROWS: [usize; 8] = [0, 1, 2, 3, 16, 17, 18, 19];
 const CUTLASS_COLS: [usize; 8] = [0, 1, 2, 3, 32, 33, 34, 35];
 
+/// Signed int8 m16n8k32 accumulator lane tile from the fused tensor kernel.
+const TENSOR_ROWS: [usize; 2] = [0, 8];
+const TENSOR_COLS: [usize; 32] = [
+    0, 1, 8, 9, 16, 17, 24, 25, 32, 33, 40, 41, 48, 49, 56, 57,
+    64, 65, 72, 73, 80, 81, 88, 89, 96, 97, 104, 105, 112, 113, 120, 121,
+];
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum TileLayout {
     Scattered = 0,
@@ -28,6 +36,7 @@ enum TileLayout {
     Cutlass = 2,
     Contiguous8x8 = 3,
     Contiguous4x8 = 4,
+    Tensor2x32 = 5,
 }
 
 impl TileLayout {
@@ -38,7 +47,8 @@ impl TileLayout {
             2 => Ok(Self::Cutlass),
             3 => Ok(Self::Contiguous8x8),
             4 => Ok(Self::Contiguous4x8),
-            _ => Err(format!("invalid tile_layout {v} (expected 0, 1, 2, 3, or 4)")),
+            5 => Ok(Self::Tensor2x32),
+            _ => Err(format!("invalid tile_layout {v} (expected 0 through 5)")),
         }
     }
 }
@@ -66,6 +76,7 @@ fn job_key(header: &[u8], mining_config: &[u8]) -> [u8; 32] {
     blake3_digest(&buf, None)
 }
 
+#[cfg(test)]
 fn mining_config_for_layout(layout: TileLayout) -> Result<MiningConfiguration, String> {
     let (rows_pat, cols_pat) = row_patterns(layout);
     let row_offsets: Vec<u32> = rows_pat.iter().map(|&o| o as u32).collect();
@@ -90,6 +101,7 @@ fn row_patterns(layout: TileLayout) -> (&'static [usize], &'static [usize]) {
             &[0, 1, 2, 3, 4, 5, 6, 7],
         ),
         TileLayout::Cutlass => (&CUTLASS_ROWS, &CUTLASS_COLS),
+        TileLayout::Tensor2x32 => (&TENSOR_ROWS, &TENSOR_COLS),
     }
 }
 
@@ -142,6 +154,11 @@ fn build_plain_proof_b64(
     }
 
     let (rows_pat, cols_pat) = row_patterns(layout);
+    if rows_pat.last().and_then(|offset| t_rows.checked_add(*offset)).is_none_or(|row| row >= m)
+        || cols_pat.last().and_then(|offset| t_cols.checked_add(*offset)).is_none_or(|col| col >= n)
+    {
+        return Err("hash tile extends beyond matrix dimensions".into());
+    }
     let row_offsets: Vec<u32> = rows_pat.iter().map(|&o| o as u32).collect();
     let col_offsets: Vec<u32> = cols_pat.iter().map(|&o| o as u32).collect();
     validate_tile_anchor(
@@ -189,7 +206,7 @@ fn write_err(out: Option<&mut [u8]>, msg: &str) {
 /// Build plain_proof base64. Returns 0 on success, -1 on error.
 ///
 /// `tile_layout`: 0 = BzMiner scattered 8x16, 1 = contiguous 8x16, 2 = CUTLASS Case 9 MMA 8x8,
-/// 3 = contiguous 8x8, 4 = contiguous 4x8.
+/// 3 = contiguous 8x8, 4 = contiguous 4x8, 5 = tensor 2x32.
 /// `mining_config` must be the 52-byte config used for GPU job_key (must match tile_layout).
 #[no_mangle]
 pub unsafe extern "C" fn cp_proof_build(
@@ -225,7 +242,7 @@ pub unsafe extern "C" fn cp_proof_build(
     if header.is_null() || mining_config.is_null() || a.is_null() || bt.is_null() || out_b64.is_null() {
         return fail("null pointer".into());
     }
-    if m <= 0 || n <= 0 || k <= 0 || rank <= 0 {
+    if m <= 0 || n <= 0 || k <= 0 || rank <= 0 || t_rows < 0 || t_cols < 0 {
         return fail("invalid dimensions".into());
     }
     let layout = match TileLayout::from_i32(tile_layout) {
@@ -363,9 +380,69 @@ mod tests {
     use super::*;
 
     #[test]
+    fn tensor_layout_metadata_and_all_lane_anchors() {
+        assert!(TileLayout::from_i32(5).unwrap() == TileLayout::Tensor2x32);
+        let rows: Vec<u32> = TENSOR_ROWS.iter().map(|&v| v as u32).collect();
+        let cols: Vec<u32> = TENSOR_COLS.iter().map(|&v| v as u32).collect();
+        let config = mining_config_bytes(4096, 128, &rows, &cols).unwrap();
+        assert_eq!(&config[..20], &[
+            0, 16, 0, 0, 128, 0, 0, 0, 7, 1, 0, 0, 0, 0, 0, 1, 3, 15, 0, 0,
+        ]);
+        for thread in 0..256 {
+            let row = (thread / 32) * 16 + (thread % 32) / 4;
+            let col = (thread % 4) * 2;
+            validate_tile_anchor(&rows, &cols, row, col).unwrap();
+            assert!(row + 8 < 128 && col + 121 < 128);
+        }
+        let parsed = mining_config_for_layout(TileLayout::Tensor2x32).unwrap();
+        let mut target = [0u8; 32];
+        primitive_types::U256::from(1u64).to_big_endian(&mut target);
+        let bound = verify::extract_difficulty_bound_from_pool_target(&target, &parsed).unwrap();
+        assert_eq!(bound, primitive_types::U256::from(2u64 * 32 * 32 * 128));
+    }
+
+    #[test]
+    fn tensor_proof_verifies_legacy_and_salted_versions() {
+        use zk_pow::api::proof::IncompleteBlockHeader;
+        use zk_pow::ffi::plain_proof::PlainProof as ZkPlainProof;
+        let (m, n, k) = (256, 256, 4096);
+        let a: Vec<i8> = (0..m*k).map(|i| ((i*7) % 127) as i8 - 63).collect();
+        let bt: Vec<i8> = (0..n*k).map(|i| ((i*11) % 127) as i8 - 63).collect();
+        let rows: Vec<u32> = TENSOR_ROWS.iter().map(|&v| v as u32).collect();
+        let cols: Vec<u32> = TENSOR_COLS.iter().map(|&v| v as u32).collect();
+        let config = mining_config_bytes(k as u32, 128, &rows, &cols).unwrap();
+        let header = [0u8; 76];
+        let block_header = IncompleteBlockHeader::from_bytes(&header).unwrap();
+        let factor = primitive_types::U256::from(2u64 * 32 * 32 * 128);
+        let mut target = [0u8; 32];
+        (primitive_types::U256::MAX / factor).to_big_endian(&mut target);
+        for (t_rows, t_cols) in [(0,0), (247,134)] {
+            let b64 = build_plain_proof_b64(&header, &config, &a, &bt, m, n, k,
+                128, t_rows, t_cols, TileLayout::Tensor2x32).unwrap();
+            let raw = STANDARD.decode(&b64).unwrap();
+            let indices: PlainProof = bincode::deserialize(&raw).unwrap();
+            assert_eq!(indices.a.row_indices, vec![t_rows, t_rows+8]);
+            assert_eq!(indices.bt.row_indices, TENSOR_COLS.iter().map(|c| t_cols+c).collect::<Vec<_>>());
+            let proof = ZkPlainProof::deserialize_compat(&raw).unwrap();
+            for version in [2,3] {
+                verify_plain_proof_with_pool_target(&block_header, &proof, &target, version).unwrap();
+            }
+        }
+        for (t_rows, t_cols) in [(248,0), (0,136), (usize::MAX,0)] {
+            let error = build_plain_proof_b64(&header, &config, &a, &bt, m, n, k,
+                128, t_rows, t_cols, TileLayout::Tensor2x32).unwrap_err();
+            assert!(error.contains("beyond matrix"));
+        }
+        assert!(build_plain_proof_b64(&header, &config, &a, &bt, m, n, k,
+            128, 0, 1, TileLayout::Tensor2x32).is_err());
+        assert!(build_plain_proof_b64(&header, &config, &a, &bt, m, n, k,
+            128, 0, 0, TileLayout::Scattered).is_err());
+    }
+
+    #[test]
     fn round_trip_bincode_header() {
-        let m = 4;
-        let n = 4;
+        let m = 8;
+        let n = 16;
         let k = 256;
         let a: Vec<i8> = (0..(m * k)).map(|i| (i % 127) as i8 - 64).collect();
         let bt: Vec<i8> = (0..(n * k)).map(|i| ((i * 3) % 127) as i8 - 64).collect();
@@ -467,15 +544,15 @@ mod tests {
         use zk_pow::api::proof::IncompleteBlockHeader;
         use zk_pow::ffi::plain_proof::PlainProof as ZkPlainProof;
 
-        let m = 4;
-        let n = 4;
-        let k = 256;
+        let m = 128;
+        let n = 128;
+        let k = 4096;
         let a: Vec<i8> = (0..(m * k)).map(|i| (i % 127) as i8 - 64).collect();
         let bt: Vec<i8> = (0..(n * k)).map(|i| ((i * 3) % 127) as i8 - 64).collect();
         let header = [0u8; 76];
         let row_offsets: Vec<u32> = (0..8).map(|i| i as u32).collect();
         let col_offsets: Vec<u32> = (0..16).map(|i| i as u32).collect();
-        let config = mining_config_bytes(256, 256, &row_offsets, &col_offsets).unwrap();
+        let config = mining_config_bytes(4096, 128, &row_offsets, &col_offsets).unwrap();
         let b64 = build_plain_proof_b64(
             &header,
             &config,
@@ -484,7 +561,7 @@ mod tests {
             m,
             n,
             k,
-            256,
+            128,
             0,
             0,
             TileLayout::Contiguous,
@@ -494,9 +571,8 @@ mod tests {
         let block_header = IncompleteBlockHeader::from_bytes(&header).unwrap();
         let raw = STANDARD.decode(&b64).unwrap();
         let pp: ZkPlainProof = ZkPlainProof::deserialize_compat(&raw).unwrap();
-        // Near-max share target that still scales under the rank-penalized factor
-        // (8*16*(k/r)*128 with r=256, k=256 → 16384).
-        let factor = primitive_types::U256::from(8u64 * 16 * 128);
+        // Near-max target scaled by tile area, rank steps and the rank floor.
+        let factor = primitive_types::U256::from(8u64 * 16 * (4096 / 128) * 128);
         let mut pool_target = [0u8; 32];
         (primitive_types::U256::MAX / factor).to_big_endian(&mut pool_target);
         verify_plain_proof_with_pool_target(&block_header, &pp, &pool_target, 2).expect("verify");

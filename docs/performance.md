@@ -45,6 +45,14 @@ build/cmake/cppminer --backend cuda --tensor-fused \
 
 ## Correctness and remaining work
 
+### 64-wide K tile on the RTX 5060 Ti
+
+The fused kernel now uses a 64-wide K tile and three 16 KiB shared-memory stages (48 KiB per CTA), rather than a 128-wide tile and 96 KiB per CTA. A rank-128 checkpoint spans two K tiles, so the transcript cursor advances only after all four 32-wide MMA blocks complete. The independent CPU fixture checks 1,024 full transcripts and keyed digests at **both** rank 64 and rank 128. CUDA memcheck, racecheck, and synccheck found zero errors (racecheck: zero warnings) on that fixture. The offline mock built and fully verified a certificate-version-3 share.
+
+The isolated 8192² × 4096 CUDA-event scan fell from about 15.0 ms (18.3 TMAC/s) to **7.66–8.14 ms** (33.8–35.9 TMAC/s). A separate two-stage 128-wide trial varied between 14.60 and 14.98 ms across six alternating measurements against the original three-stage 128-wide build, which varied between 14.55 and 15.06 ms. Those ranges overlap, so the two-stage trial was not retained.
+
+A 45-second production-size LuckyPool check of the 64-wide kernel had 19 attempt timings; eight full scans (at least 2.5 seconds) had **22.9 TMAC/s median**. The pool returned **11 accepted share responses**, with no rejected response in the captured log. Of 44 one-second GPU telemetry samples, 36 with at least 50% utilization had **105.1 W median**. This excludes the rest of the computer. The root dashboard uses a conservative **22 TH/s** planning rate and remains disarmed pending measured whole-system power and positive net returns. These figures are short-run results, not a payout or sustained earnings record.
+
 A subsequent tuning check compared separate rank GEMMs against `cublasGemmStridedBatchedEx` over three alternating trials. At 4/32 batches the separate path gave 5.35, 5.32, and 5.53 TMAC/s wall sweep rates, versus 5.30, 5.14, and 5.36 for the batched path. At 16/32 both paths were about 5.9 TMAC/s. The batched experiment was removed because it gave no reliable gain. Larger row batches offer a small speed improvement in this small profile, but have not been selected for live operation or checked for whole-system energy efficiency.
 
 The CUDA differential test compares all 16 jackpot words for 257 synthetic tiles against a separate serial CPU calculation over 64 cumulative rank steps. The optimized miner also builds a mock share that passes the ZK verifier. A 120-second LuckyPool test received five successful `plain_proof` share replies (IDs 2 through 6) and was then stopped. Fee switching was disabled because the payout and project fee addresses were identical.

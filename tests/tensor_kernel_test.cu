@@ -18,20 +18,20 @@ template<class T> struct Buffer {
     Buffer(const Buffer&) = delete;
     Buffer& operator=(const Buffer&) = delete;
 };
-static void launch(int m, int n, int k, const int8_t* a, const int8_t* b,
+static void launch(int m, int n, int k, int rank, const int8_t* a, const int8_t* b,
                    const uint32_t* key, const uint32_t* target,
                    uint32_t* hashes, uint8_t* hits, uint32_t* words = nullptr) {
     pearl::sm80::search_perthread_smem_pipelined::
-        launch_pearl_gemm_search_perthread_smem_pipelined_R<128>(
-            m, n, k, a, b, key, target, hashes, hits, nullptr, words);
+        launch_pearl_gemm_search_perthread_smem_pipelined(
+            rank, m, n, k, a, b, key, target, hashes, hits, nullptr, words);
     check(cudaGetLastError());
 }
 static uint32_t random_word(uint32_t& state) {
     state ^= state << 13; state ^= state >> 17; state ^= state << 5;
     return state;
 }
-static void verify() {
-    constexpr int m = 256, n = 256, k = 4096, rank = 128;
+static void verify(int rank) {
+    constexpr int m = 256, n = 256, k = 4096;
     constexpr int candidates = (m / 128) * (n / 128) * 256;
     std::vector<int8_t> a(m*k), b(n*k);
     uint32_t random = 0x83a19820;
@@ -46,7 +46,7 @@ static void verify() {
     check(cudaMemcpy(db.data,b.data(),b.size(),cudaMemcpyHostToDevice));
     check(cudaMemcpy(dkey.data,key.data(),32,cudaMemcpyHostToDevice));
     check(cudaMemcpy(dtarget.data,target.data(),32,cudaMemcpyHostToDevice));
-    launch(m,n,k,da.data,db.data,dkey.data,dtarget.data,hashes.data,hits.data,words.data);
+    launch(m,n,k,rank,da.data,db.data,dkey.data,dtarget.data,hashes.data,hits.data,words.data);
     std::vector<uint32_t> actual_words(candidates*16), actual_hashes(candidates*8);
     std::vector<uint8_t> actual_hits(candidates);
     check(cudaMemcpy(actual_words.data(),words.data,actual_words.size()*4,cudaMemcpyDeviceToHost));
@@ -94,10 +94,10 @@ static void verify() {
         if(actual_hits[candidate]!=1) throw std::runtime_error("maximum target did not accept");
     }
     check(cudaMemset(dtarget.data,0,32));
-    launch(m,n,k,da.data,db.data,dkey.data,dtarget.data,hashes.data,hits.data);
+    launch(m,n,k,rank,da.data,db.data,dkey.data,dtarget.data,hashes.data,hits.data);
     check(cudaMemcpy(actual_hits.data(),hits.data,actual_hits.size(),cudaMemcpyDeviceToHost));
     for(auto hit : actual_hits) if(hit) throw std::runtime_error("zero target accepted");
-    std::puts("1024 tensor transcripts and digests match independent CPU references");
+    std::printf("1024 tensor transcripts and digests match independent CPU references (R=%d)\n", rank);
 }
 static void benchmark() {
     constexpr int m=8192,n=8192,k=4096,candidates=(m/128)*(n/128)*256;
@@ -111,12 +111,12 @@ static void benchmark() {
     for(auto& value:input) value=int(random_word(random)%127)-63;
     check(cudaMemcpy(b.data,input.data(),input.size(),cudaMemcpyHostToDevice));
     check(cudaMemset(key.data,0,32)); check(cudaMemset(target.data,0,32));
-    for(int i=0;i<3;++i) launch(m,n,k,a.data,b.data,key.data,target.data,hashes.data,hits.data);
+    for(int i=0;i<3;++i) launch(m,n,k,128,a.data,b.data,key.data,target.data,hashes.data,hits.data);
     check(cudaDeviceSynchronize());
     cudaEvent_t start,end;
     check(cudaEventCreate(&start)); check(cudaEventCreate(&end));
     check(cudaEventRecord(start));
-    for(int i=0;i<10;++i) launch(m,n,k,a.data,b.data,key.data,target.data,hashes.data,hits.data);
+    for(int i=0;i<10;++i) launch(m,n,k,128,a.data,b.data,key.data,target.data,hashes.data,hits.data);
     check(cudaEventRecord(end)); check(cudaEventSynchronize(end));
     float elapsed; check(cudaEventElapsedTime(&elapsed,start,end));
     std::printf("Fused tensor scan 8192x8192x4096: %.3f ms, %.2f TMAC/s (10 runs)\n",
@@ -129,7 +129,7 @@ int main(int argc,char** argv) {
     cudaDeviceProp device;
     check(cudaGetDeviceProperties(&device,0));
     if(device.major<8) return 77;
-    try { verify(); if(argc>1 && std::strcmp(argv[1],"--bench")==0) benchmark(); }
+    try { verify(64); verify(128); if(argc>1 && std::strcmp(argv[1],"--bench")==0) benchmark(); }
     catch(const std::exception& error) { std::fprintf(stderr,"%s\n",error.what()); return 1; }
     return 0;
 }

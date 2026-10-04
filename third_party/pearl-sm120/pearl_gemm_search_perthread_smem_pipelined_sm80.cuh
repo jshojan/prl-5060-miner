@@ -1,24 +1,12 @@
 // pearl_gemm_search_perthread_smem_pipelined_sm80.cuh
 //
-// cp.async double-buffered variant of the shared-mem-tiled per-thread
-// PoW search kernel. Builds on pearl_gemm_search_perthread_smem_sm80.cuh
-// by overlapping the next K-tile's global → shared loads with the
-// current tile's MMAs.
+// cp.async triple-buffered variant of the shared-mem-tiled per-thread
+// PoW search kernel. The 64-wide K tile uses 48 KiB of dynamic shared
+// memory, permitting two CTAs per sm_120 SM by shared-memory capacity.
 //
-// Pipelining model (2 stages):
-//   Pre-loop:  cp.async load tile 0 → sA[0], sB[0]; commit.
-//   Iter S:    if S+1 < N: cp.async load tile S+1 → sA[(S+1)%2], sB[(S+1)%2]; commit.
-//              __pipeline_wait_prior(1 if has_next else 0).
-//              __syncthreads.
-//              MMAs on sA[S%2], sB[S%2].
-//              __syncthreads — gate before next iter's prefetch
-//                              overwrites the (S%2)^1 buffer.
-//
-// Bit-exactness: identical per-thread accumulator layout, identical
-// reduce-firing schedule, identical Blake3 finalize. Only the path
-// from global → shared changes (cp.async instead of synchronous int4
-// copies); the path from shared → register and the MMA atom sequence
-// are unchanged.
+// Two future K tiles can be prefetched while the current tile runs.
+// The reduction count advances only when a full rank checkpoint completes;
+// with R=128 that happens every second K tile.
 
 #pragma once
 
@@ -30,19 +18,20 @@
 
 namespace pearl::sm80::search_perthread_smem_pipelined {
 
-// Layout constants — keep in sync with the smem reference variant.
+// Layout constants.
 constexpr int TILE_M = 128;
 constexpr int TILE_N = 128;
 constexpr int ATOM_M = 16;
 constexpr int ATOM_N = 8;
 constexpr int ATOM_K = 32;
-constexpr int CTA_BK = 128;
-constexpr int K_BLOCKS_PER_TILE = CTA_BK / ATOM_K;   // 4
+constexpr int CTA_BK = 64;
+constexpr int K_BLOCKS_PER_TILE = CTA_BK / ATOM_K;   // 2
 constexpr int NUM_WARPS = TILE_M / ATOM_M;           // 8
 constexpr int N_ATOMS_PER_WARP = TILE_N / ATOM_N;    // 16
 constexpr int CTA_THREADS = NUM_WARPS * 32;          // 256
 constexpr int THREADS_PER_TILE = CTA_THREADS;
 constexpr int MSG_BLOCK_SIZE_U32 = 16;
+constexpr int NUM_STAGES = 3;
 
 __device__ __forceinline__ void
 mma_m16n8k32_s8s8s32(uint32_t d[4], const uint32_t a[4], const uint32_t b[2]) {
@@ -67,19 +56,7 @@ __global__ void pearl_gemm_search_perthread_smem_pipelined_kernel(
   (void)M; (void)N;
   static_assert(R == 64 || R == 128, "R must be 64 or 128");
   constexpr int REDUCE_EVERY_K  = R / ATOM_K;
-  constexpr int ACCUMS_PER_TILE =
-      (K_BLOCKS_PER_TILE / REDUCE_EVERY_K > 0)
-          ? (K_BLOCKS_PER_TILE / REDUCE_EVERY_K) : 1;
-
-  // Triple-buffered shared. Three stages × (TILE_M=128) × (CTA_BK=128)
-  // = 48 KB for sA + 48 KB for sB = 96 KB / CTA. Just under sm_80's
-  // 99 KB dynamic shared cap; the launcher opts in via
-  // cudaFuncAttributeMaxDynamicSharedMemorySize. The extra stage lets
-  // TWO cp.async groups stay in flight while MMAs of the current tile
-  // run — more load-latency hiding than the 2-stage variant. Same
-  // 1 CTA/SM occupancy ceiling either way (96 KB > 100/2 = 50 KB), so
-  // no occupancy regression.
-  constexpr int kNumStages = 3;
+  constexpr int kNumStages = NUM_STAGES;
   extern __shared__ __align__(16) int8_t s_buf[];
   int8_t* const sA = s_buf;
   int8_t* const sB = s_buf + kNumStages * TILE_M * CTA_BK;
@@ -106,24 +83,19 @@ __global__ void pearl_gemm_search_perthread_smem_pipelined_kernel(
   }
 
   uint32_t transcript[MSG_BLOCK_SIZE_U32];
-  uint32_t m_tile_transcript[ACCUMS_PER_TILE];
   uint32_t m_reduction_count = 0u;
   uint32_t m_k_block_count   = 0u;
   #pragma unroll
   for (int i = 0; i < MSG_BLOCK_SIZE_U32; ++i) transcript[i] = 0u;
-  #pragma unroll
-  for (int i = 0; i < ACCUMS_PER_TILE; ++i) m_tile_transcript[i] = 0u;
 
   const int num_k_blocks      = K / ATOM_K;
   const int last_full_k_block = num_k_blocks;
   const int num_k_tiles       = K / CTA_BK;
 
-  // Cooperative cp.async load helper: each thread issues 4×16-byte
-  // cp.async loads for its half-row of A and B into stage[0|1].
-  // Layout: thread tid owns row (tid >> 1), cols [(tid & 1)*64 .. +63].
+  // Each thread loads 32 bytes of one row from each matrix.
   auto issue_load_tile = [&](int k_base, int stage) {
     const int row_offset = tid >> 1;
-    const int col_offset = (tid & 1) * 64;
+    const int col_offset = (tid & 1) * 32;
     int8_t* a_dst = sA + stage * (TILE_M * CTA_BK)
                        + row_offset * CTA_BK + col_offset;
     int8_t* b_dst = sB + stage * (TILE_N * CTA_BK)
@@ -133,7 +105,7 @@ __global__ void pearl_gemm_search_perthread_smem_pipelined_kernel(
     const int8_t* b_src =
         BpEB + (tile_n_base + row_offset) * K + k_base + col_offset;
     #pragma unroll
-    for (int i = 0; i < 4; ++i) {
+    for (int i = 0; i < 2; ++i) {
       __pipeline_memcpy_async(a_dst + i * 16, a_src + i * 16, 16);
       __pipeline_memcpy_async(b_dst + i * 16, b_src + i * 16, 16);
     }
@@ -156,14 +128,6 @@ __global__ void pearl_gemm_search_perthread_smem_pipelined_kernel(
     const int stage = k_tile % kNumStages;
     const int next_prefetch = k_tile + (kNumStages - 1);  // tile we issue THIS iter
     const bool prefetch_in_flight = next_prefetch < num_k_tiles;
-
-    // Preload transcript values that this K-tile's reductions will
-    // rotl-then-XOR into. Matches the non-pipelined smem kernel.
-    #pragma unroll
-    for (int i = 0; i < ACCUMS_PER_TILE; ++i) {
-      m_tile_transcript[i] = transcript[(m_reduction_count + i)
-                                        & (MSG_BLOCK_SIZE_U32 - 1)];
-    }
 
     // Issue the next pre-fetch (kNumStages - 1 ahead of the current
     // K-tile), keeping the pipeline depth saturated.
@@ -234,27 +198,15 @@ __global__ void pearl_gemm_search_perthread_smem_pipelined_kernel(
           #pragma unroll
           for (int j = 0; j < 4; ++j) pt_hash ^= accum[na][j];
         }
-        const int idx = k_block / REDUCE_EVERY_K;
-        const uint32_t prev = m_tile_transcript[idx];
-        m_tile_transcript[idx] = ((prev << 13) | (prev >> 19)) ^ pt_hash;
+        const uint32_t prev = transcript[m_reduction_count];
+        transcript[m_reduction_count] = ((prev << 13) | (prev >> 19)) ^ pt_hash;
+        m_reduction_count = (m_reduction_count + 1) & (MSG_BLOCK_SIZE_U32 - 1);
       }
     }
 
-    // Writeback this K-tile's transcript additions; rotate the cursor.
-    #pragma unroll
-    for (int i = 0; i < ACCUMS_PER_TILE; ++i) {
-      transcript[(m_reduction_count + i) & (MSG_BLOCK_SIZE_U32 - 1)] =
-          m_tile_transcript[i];
-    }
-    m_reduction_count = (m_reduction_count + ACCUMS_PER_TILE)
-                        & (MSG_BLOCK_SIZE_U32 - 1);
-
     // Gate before the NEXT iter's prefetch (issued at the top of iter
     // S+1) starts overwriting the buffer this iter just read from. The
-    // prefetch targets sA[(S+1)%2 ^ 1] = sA[S%2] = the buffer we just
-    // consumed; without this barrier a slow warp could still be reading
-    // sA[stage] when a fast warp's cp.async write to the same buffer
-    // for iter S+2's prefetch lands.
+    // prefetch eventually reuses this stage. All warps must finish reads.
     __syncthreads();
   }
 
@@ -304,10 +256,8 @@ inline void launch_pearl_gemm_search_perthread_smem_pipelined_R(
     uint32_t* d_transcript_per_tile_thread = nullptr) {
   dim3 grid(N / TILE_N, M / TILE_M);
   dim3 block(CTA_THREADS);
-  // 96 KB dynamic shared (3 × (TILE_M × CTA_BK) for sA, same for sB).
-  // sm_80 + needs opt-in for > 48 KB; idempotent across launches.
-  // Must match kNumStages in the kernel above (currently 3).
-  constexpr int kNumStages = 3;
+  // 48 KiB dynamic shared. The opt-in is idempotent across launches.
+  constexpr int kNumStages = NUM_STAGES;
   constexpr int smem_bytes =
       kNumStages * TILE_M * CTA_BK + kNumStages * TILE_N * CTA_BK;
   static bool attr_set = false;

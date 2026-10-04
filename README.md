@@ -9,6 +9,7 @@ An open source PearlHash miner under development for the RTX 5060 Ti. This code 
 - On the RTX 5060 Ti, the warp jackpot kernel reports about 5.5 TH/s after warmup at LuckyPool, up from about 4.7 TH/s before this change. The original run accepted five `plain_proof` shares; the new kernel also passes the full offline proof verifier and has accepted live shares. This remains far below the historical 91.3 TH/s closed miner baseline; pool acceptance does not establish profitability or a payout. See [performance evidence](docs/performance.md).
 - The source contains a transparent 1% project fee routed to the project owner's Pearl wallet. When the mining wallet is the same address, fee switching is disabled. No third party developer fee address is present.
 - The source is public for review and development. Production use needs a faster kernel and a measured whole-system power draw.
+- A separate fused tensor-core prototype reaches about 18.3 TMAC/s in an isolated scan and matches independent CPU transcript and digest calculations. It is available as `tensor_kernel_test --bench`; its different hash pattern still needs proof and pool integration before it can replace the live miner.
 
 ## Build on the 5060 Ti
 

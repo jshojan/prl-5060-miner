@@ -519,4 +519,11 @@ if(CP_ENABLE_CUDA)
     target_include_directories(jackpot_reduce_test PRIVATE src/cuda)
     add_test(NAME jackpot_reduction COMMAND jackpot_reduce_test)
     set_tests_properties(jackpot_reduction PROPERTIES SKIP_RETURN_CODE 77)
+    add_executable(tensor_kernel_test tests/tensor_kernel_test.cu
+        ${B3_DIR}/blake3.c ${B3_DIR}/blake3_dispatch.c ${B3_DIR}/blake3_portable.c)
+    target_include_directories(tensor_kernel_test PRIVATE third_party/pearl-sm120 ${B3_DIR})
+    target_compile_definitions(tensor_kernel_test PRIVATE BLAKE3_NO_SSE2 BLAKE3_NO_SSE41
+        BLAKE3_NO_AVX2 BLAKE3_NO_AVX512 BLAKE3_USE_NEON=0)
+    add_test(NAME tensor_kernel_reference COMMAND tensor_kernel_test)
+    set_tests_properties(tensor_kernel_reference PROPERTIES SKIP_RETURN_CODE 77)
 endif()

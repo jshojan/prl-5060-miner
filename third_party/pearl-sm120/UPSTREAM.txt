@@ -1,0 +1,4 @@
+Source: https://github.com/puneet-mehta/pearl-hashrate-miner
+Revision: a6574254cb1599046b174236ee5bea1070534517
+Selected CUDA headers for experimental fused tensor-core validation.
+These files contain no mining network connection or developer fee scheduler.

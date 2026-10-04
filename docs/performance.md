@@ -21,6 +21,21 @@ build/cmake/cppminer --backend cuda --cublas-period --no-cutlass-fused \
   --row-period-batch 4 --col-period-batch 32 --profile-scan 6 --dev
 ```
 
+## Experimental fused tensor-core path
+
+The selected MIT-licensed kernels from [pearl-hashrate-miner](https://github.com/puneet-mehta/pearl-hashrate-miner) are bound to revision `a6574254cb1599046b174236ee5bea1070534517` under `third_party/pearl-sm120`. This is a prototype tested separately from the pool miner. It uses native signed int8 tensor instructions, three stages of shared-memory prefetching, and register-resident cumulative products instead of writing rank-history matrices to global memory.
+
+`tensor_kernel_test` checks all 1,024 transcripts on a 256x256x4096 input against an independent CPU matrix calculation, then checks all keyed digests against the portable BLAKE3 library. Maximum and zero targets exercise acceptance and rejection. Signed inputs are independently seeded in [-63,63]. CUDA memcheck and synccheck reported zero errors; racecheck reported zero errors and warnings on this correctness fixture.
+
+The isolated 8192x8192x4096 scan measured **15.035 ms, 18.28 TMAC/s**, averaged over ten launches after three warmups, with independently seeded random matrices. Allocation, input generation, host transfers, noise preparation, and proof generation are excluded. This is a CUDA-event kernel rate, not live accepted mining throughput. Timing fixtures use the same kernel but larger matrices than the CPU correctness fixture.
+
+```bash
+build/cmake/tensor_kernel_test --bench
+ctest --test-dir build/cmake --output-on-failure
+```
+
+Its 2x32 hash pattern (rows `[0,8]`, columns `[0,1,8,9,...,120,121]`) differs from the current miner's 8x16 pattern. Integration must make proof metadata, signal extraction, target scaling, and fee work accounting match that pattern, then pass the full ZK verifier and receive live accepted pool shares. The production miner and dashboard benchmark continue to use the validated 5.5 TH/s path until those gates pass.
+
 ## Correctness and remaining work
 
 A subsequent tuning check compared separate rank GEMMs against `cublasGemmStridedBatchedEx` over three alternating trials. At 4/32 batches the separate path gave 5.35, 5.32, and 5.53 TMAC/s wall sweep rates, versus 5.30, 5.14, and 5.36 for the batched path. At 16/32 both paths were about 5.9 TMAC/s. The batched experiment was removed because it gave no reliable gain. Larger row batches offer a small speed improvement in this small profile, but have not been selected for live operation or checked for whole-system energy efficiency.

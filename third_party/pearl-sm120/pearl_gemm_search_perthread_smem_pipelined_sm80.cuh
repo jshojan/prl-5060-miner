@@ -52,7 +52,9 @@ __global__ void pearl_gemm_search_perthread_smem_pipelined_kernel(
     const uint32_t* __restrict__ pow_target,
     uint32_t* __restrict__ hash_per_tile_thread,
     uint8_t*  __restrict__ hit_per_tile_thread,
-    uint32_t* __restrict__ transcript_per_tile_thread) {
+    uint32_t* __restrict__ transcript_per_tile_thread,
+    int* __restrict__ found, int* __restrict__ out_rows,
+    int* __restrict__ out_cols, int row_period0, int col_period0) {
   (void)M; (void)N;
   static_assert(R == 64 || R == 128, "R must be 64 or 128");
   constexpr int REDUCE_EVERY_K  = R / ATOM_K;
@@ -231,11 +233,19 @@ __global__ void pearl_gemm_search_perthread_smem_pipelined_kernel(
   }
 
   const int tile_linear = tile_m_idx * num_tile_n + tile_n_idx;
-  const int out_base    = (tile_linear * THREADS_PER_TILE + tid) * 8;
-  uint32_t* out_hash = hash_per_tile_thread + out_base;
-  #pragma unroll
-  for (int i = 0; i < 8; ++i) out_hash[i] = hash_cv[i];
-  hit_per_tile_thread[tile_linear * THREADS_PER_TILE + tid] = hit ? 1u : 0u;
+  if (hash_per_tile_thread != nullptr) {
+    const int out_base = (tile_linear * THREADS_PER_TILE + tid) * 8;
+    uint32_t* out_hash = hash_per_tile_thread + out_base;
+    #pragma unroll
+    for (int i = 0; i < 8; ++i) out_hash[i] = hash_cv[i];
+  }
+  if (hit_per_tile_thread != nullptr)
+    hit_per_tile_thread[tile_linear * THREADS_PER_TILE + tid] = hit ? 1u : 0u;
+
+  if (hit && found != nullptr && atomicCAS(found, 0, 1) == 0) {
+    *out_rows = (row_period0 + tile_m_idx) * TILE_M + warp_id * ATOM_M + gid;
+    *out_cols = (col_period0 + tile_n_idx) * TILE_N + tig * 2;
+  }
 
   if (transcript_per_tile_thread != nullptr) {
     const int t_base = (tile_linear * THREADS_PER_TILE + tid) * 16;
@@ -253,7 +263,9 @@ inline void launch_pearl_gemm_search_perthread_smem_pipelined_R(
     const uint32_t* d_pow_key, const uint32_t* d_pow_target,
     uint32_t* d_hash_per_tile_thread, uint8_t* d_hit_per_tile_thread,
     cudaStream_t stream = nullptr,
-    uint32_t* d_transcript_per_tile_thread = nullptr) {
+    uint32_t* d_transcript_per_tile_thread = nullptr,
+    int* d_found = nullptr, int* d_out_rows = nullptr,
+    int* d_out_cols = nullptr, int row_period0 = 0, int col_period0 = 0) {
   dim3 grid(N / TILE_N, M / TILE_M);
   dim3 block(CTA_THREADS);
   // 48 KiB dynamic shared. The opt-in is idempotent across launches.
@@ -271,7 +283,8 @@ inline void launch_pearl_gemm_search_perthread_smem_pipelined_R(
       <<<grid, block, smem_bytes, stream>>>(
           M, N, K, d_ApEA, d_BpEB, d_pow_key, d_pow_target,
           d_hash_per_tile_thread, d_hit_per_tile_thread,
-          d_transcript_per_tile_thread);
+          d_transcript_per_tile_thread, d_found, d_out_rows, d_out_cols,
+          row_period0, col_period0);
 }
 
 inline void launch_pearl_gemm_search_perthread_smem_pipelined(
@@ -280,17 +293,21 @@ inline void launch_pearl_gemm_search_perthread_smem_pipelined(
     const uint32_t* d_pow_key, const uint32_t* d_pow_target,
     uint32_t* d_hash_per_tile_thread, uint8_t* d_hit_per_tile_thread,
     cudaStream_t stream = nullptr,
-    uint32_t* d_transcript_per_tile_thread = nullptr) {
+    uint32_t* d_transcript_per_tile_thread = nullptr,
+    int* d_found = nullptr, int* d_out_rows = nullptr,
+    int* d_out_cols = nullptr, int row_period0 = 0, int col_period0 = 0) {
   if (R == 64) {
     launch_pearl_gemm_search_perthread_smem_pipelined_R<64>(
         M, N, K, d_ApEA, d_BpEB, d_pow_key, d_pow_target,
         d_hash_per_tile_thread, d_hit_per_tile_thread, stream,
-        d_transcript_per_tile_thread);
+        d_transcript_per_tile_thread, d_found, d_out_rows, d_out_cols,
+        row_period0, col_period0);
   } else {
     launch_pearl_gemm_search_perthread_smem_pipelined_R<128>(
         M, N, K, d_ApEA, d_BpEB, d_pow_key, d_pow_target,
         d_hash_per_tile_thread, d_hit_per_tile_thread, stream,
-        d_transcript_per_tile_thread);
+        d_transcript_per_tile_thread, d_found, d_out_rows, d_out_cols,
+        row_period0, col_period0);
   }
 }
 

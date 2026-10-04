@@ -20,10 +20,13 @@ template<class T> struct Buffer {
 };
 static void launch(int m, int n, int k, int rank, const int8_t* a, const int8_t* b,
                    const uint32_t* key, const uint32_t* target,
-                   uint32_t* hashes, uint8_t* hits, uint32_t* words = nullptr) {
+                   uint32_t* hashes, uint8_t* hits, uint32_t* words = nullptr,
+                   int* found = nullptr, int* out_rows = nullptr, int* out_cols = nullptr,
+                   int row_period0 = 0, int col_period0 = 0) {
     pearl::sm80::search_perthread_smem_pipelined::
         launch_pearl_gemm_search_perthread_smem_pipelined(
-            rank, m, n, k, a, b, key, target, hashes, hits, nullptr, words);
+            rank, m, n, k, a, b, key, target, hashes, hits, nullptr, words,
+            found, out_rows, out_cols, row_period0, col_period0);
     check(cudaGetLastError());
 }
 static uint32_t random_word(uint32_t& state) {
@@ -93,6 +96,31 @@ static void verify(int rank) {
                 throw std::runtime_error("tensor digest differs from BLAKE3 reference");
         if(actual_hits[candidate]!=1) throw std::runtime_error("maximum target did not accept");
     }
+
+    int best = 0;
+    for(int candidate=1;candidate<candidates;++candidate) {
+        for(int i=7;i>=0;--i) {
+            const uint32_t here = actual_hashes[candidate*8+i];
+            const uint32_t smallest = actual_hashes[best*8+i];
+            if(here < smallest) { best = candidate; break; }
+            if(here > smallest) break;
+        }
+    }
+    Buffer<int> found(1), out_rows(1), out_cols(1);
+    check(cudaMemset(found.data, 0, sizeof(int)));
+    check(cudaMemcpy(dtarget.data, &actual_hashes[best*8], 32, cudaMemcpyHostToDevice));
+    launch(m,n,k,rank,da.data,db.data,dkey.data,dtarget.data,
+           nullptr,nullptr,nullptr,found.data,out_rows.data,out_cols.data,3,5);
+    int selected=0, selected_row=0, selected_col=0;
+    check(cudaMemcpy(&selected,found.data,sizeof(int),cudaMemcpyDeviceToHost));
+    check(cudaMemcpy(&selected_row,out_rows.data,sizeof(int),cudaMemcpyDeviceToHost));
+    check(cudaMemcpy(&selected_col,out_cols.data,sizeof(int),cudaMemcpyDeviceToHost));
+    const int tile = best / 256, lane = best % 256;
+    const int expected_row = (3 + tile / (n/128)) * 128 + (lane/32)*16 + (lane%32)/4;
+    const int expected_col = (5 + tile % (n/128)) * 128 + (lane%4)*2;
+    if(selected != 1 || selected_row != expected_row || selected_col != expected_col)
+        throw std::runtime_error("direct tensor hit coordinate differs from minimum digest");
+
     check(cudaMemset(dtarget.data,0,32));
     launch(m,n,k,rank,da.data,db.data,dkey.data,dtarget.data,hashes.data,hits.data);
     check(cudaMemcpy(actual_hits.data(),hits.data,actual_hits.size(),cudaMemcpyDeviceToHost));

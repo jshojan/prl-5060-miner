@@ -66,9 +66,6 @@ typedef struct {
     int*      d_out_t_cols;
     uint32_t* d_a_key8;
     uint32_t* d_tensor_target;
-    uint32_t* d_tensor_hashes;
-    uint8_t*  d_tensor_hits;
-    size_t    tensor_candidate_cap;
     int32_t*  d_C_hist;
     size_t    C_hist_cap;
     uint32_t* d_tile_xor;
@@ -421,8 +418,6 @@ void cp_gpu_shutdown(void)
         if(g->d_out_t_cols) cudaFree(g->d_out_t_cols);
         if(g->d_a_key8) cudaFree(g->d_a_key8);
         if(g->d_tensor_target) cudaFree(g->d_tensor_target);
-        if(g->d_tensor_hashes) cudaFree(g->d_tensor_hashes);
-        if(g->d_tensor_hits) cudaFree(g->d_tensor_hits);
         if(g->d_C_hist) cudaFree(g->d_C_hist);
         if(g->d_tile_xor) cudaFree(g->d_tile_xor);
 #if defined(CP_ENABLE_CUBLAS) && CP_ENABLE_CUBLAS
@@ -483,26 +478,13 @@ static void ensure_buffers(GpuCtx* g, int m, int n)
             g->noise_n_cap = ebr_need;
         }
     }
-    {
-        if(g_tensor_fused){
-            const size_t needed = (size_t)g_row_period_batch * (size_t)g_col_period_batch * 256;
-            if(needed > g->tensor_candidate_cap){
-                if(g->d_tensor_hashes) cudaFree(g->d_tensor_hashes);
-                if(g->d_tensor_hits) cudaFree(g->d_tensor_hits);
-                CU_CHECK(cudaMalloc(&g->d_tensor_hashes, needed * 8 * sizeof(uint32_t)));
-                CU_CHECK(cudaMalloc(&g->d_tensor_hits, needed));
-                g->tensor_candidate_cap = needed;
-            }
-        } else if(g->use_cutlass_fused){
-        /* Jackpot runs in CUTLASS mainloop tail; no tile_xor buffer. */
-    } else {
-            size_t hist_need = pp_hist_batch_bytes(
-                g_row_period_batch, g_col_period_batch);
-            if(hist_need > g->C_hist_cap){
-                if(g->d_C_hist) cudaFree(g->d_C_hist);
-                CU_CHECK(cudaMalloc(&g->d_C_hist, hist_need));
-                g->C_hist_cap = hist_need;
-            }
+    if(!g_tensor_fused && !g->use_cutlass_fused){
+        size_t hist_need = pp_hist_batch_bytes(
+            g_row_period_batch, g_col_period_batch);
+        if(hist_need > g->C_hist_cap){
+            if(g->d_C_hist) cudaFree(g->d_C_hist);
+            CU_CHECK(cudaMalloc(&g->d_C_hist, hist_need));
+            g->C_hist_cap = hist_need;
         }
     }
 }
@@ -741,29 +723,12 @@ static void gpu_period_gemm_cuda_batch(
     CU_CHECK(cudaGetLastError());
 }
 
-__global__ static void tensor_collect_hits(
-    const uint8_t* hits, int count, int col_batch,
-    int row_period0, int col_period0,
-    int* found, int* out_rows, int* out_cols)
-{
-    const int candidate = (int)(blockIdx.x * blockDim.x + threadIdx.x);
-    if(candidate >= count || !hits[candidate]) return;
-    if(atomicCAS(found, 0, 1) != 0) return;
-    const int tile = candidate / 256;
-    const int lane = candidate % 256;
-    *out_rows = (row_period0 + tile / col_batch) * 128
-              + (lane / 32) * 16 + (lane % 32) / 4;
-    *out_cols = (col_period0 + tile % col_batch) * 128
-              + (lane % 4) * 2;
-}
-
 static void gpu_period_gemm_batch(
     GpuCtx* g, int m, int n, int row_period0, int col_period0,
     int row_batch_count, int col_batch_count,
     const uint32_t bound[8])
 {
     if(g_tensor_fused){
-        const int count = row_batch_count * col_batch_count * 256;
         const int8_t* a = g->d_Ap + (size_t)row_period0 * 128 * K_DIM;
         const int8_t* b = g->d_BpT + (size_t)col_period0 * 128 * K_DIM;
         CU_CHECK(cudaMemcpy(g->d_tensor_target, bound, 8 * sizeof(uint32_t),
@@ -772,12 +737,9 @@ static void gpu_period_gemm_batch(
             launch_pearl_gemm_search_perthread_smem_pipelined_R<128>(
                 row_batch_count * 128, col_batch_count * 128, K_DIM,
                 a, b, g->d_a_key8, g->d_tensor_target,
-                g->d_tensor_hashes, g->d_tensor_hits);
-        CU_CHECK(cudaGetLastError());
-        tensor_collect_hits<<<(count + 255) / 256, 256>>>(
-            g->d_tensor_hits, count, col_batch_count,
-            row_period0, col_period0,
-            g->d_found, g->d_out_t_rows, g->d_out_t_cols);
+                nullptr, nullptr, nullptr, nullptr,
+                g->d_found, g->d_out_t_rows, g->d_out_t_cols,
+                row_period0, col_period0);
         CU_CHECK(cudaGetLastError());
         return;
     }

@@ -731,8 +731,6 @@ static void gpu_period_gemm_batch(
     if(g_tensor_fused){
         const int8_t* a = g->d_Ap + (size_t)row_period0 * 128 * K_DIM;
         const int8_t* b = g->d_BpT + (size_t)col_period0 * 128 * K_DIM;
-        CU_CHECK(cudaMemcpy(g->d_tensor_target, bound, 8 * sizeof(uint32_t),
-                            cudaMemcpyHostToDevice));
         pearl::sm80::search_perthread_smem_pipelined::
             launch_pearl_gemm_search_perthread_smem_pipelined_R<128>(
                 row_batch_count * 128, col_batch_count * 128, K_DIM,
@@ -1507,6 +1505,9 @@ int cp_gpu_run_scan_profile(int dev, int m, int n, int warmup, int runs)
     GpuCtx* g = &g_gpus[0];
     ensure_buffers(g, m, n);
     CU_CHECK(cudaSetDevice(g->dev));
+    if(g_tensor_fused)
+        CU_CHECK(cudaMemcpy(g->d_tensor_target, bound, 8 * sizeof(uint32_t),
+                            cudaMemcpyHostToDevice));
     scan_profile_ensure_events(ev);
 
     prep_t0 = cp_now_sec();
@@ -1664,6 +1665,15 @@ static int gpu_scan_device_period(
     int found = 0;
     uint64_t tiles_scanned = 0;
     double scan_t0 = cp_now_sec();
+
+    if(g_tensor_fused){
+        for(int i = 0; i < g_ngpu; i++){
+            GpuCtx* g = &g_gpus[i];
+            CU_CHECK(cudaSetDevice(g->dev));
+            CU_CHECK(cudaMemcpy(g->d_tensor_target, bound, 8 * sizeof(uint32_t),
+                                cudaMemcpyHostToDevice));
+        }
+    }
 
     if(out_tiles_scanned) *out_tiles_scanned = 0;
 

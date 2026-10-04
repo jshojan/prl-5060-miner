@@ -43,6 +43,14 @@ build/cmake/cppminer --backend cuda --tensor-fused \
   --row-period-batch 4 --col-period-batch 32 --mock --dev
 ```
 
+## Direct tensor hit selection and target upload
+
+The fused kernel now records the first qualifying 2x32 candidate directly with an atomic flag and its proof coordinates. Normal mining omits the per-thread diagnostic hash and hit buffers and the separate hit-collection kernel. It also uploads the unchanged 32-byte target once per attempt instead of once per row/column batch. The diagnostic outputs remain available to the independent CUDA test. That test still checks all 1,024 transcripts and keyed digests for both rank 64 and 128, and checks that a target set to the minimum digest returns its exact row and column even with nonzero period offsets. All four CTest checks passed. An offline certificate-version-3 mock share passed the full verifier after both changes.
+
+Two baseline/new/new/baseline sequences measured full 131072² production-size sweeps at the 4/32 batch setting. The first gave **20.18 / 20.68 / 20.58 / 20.29 TMAC/s** wall scan rates; the second gave **20.48 / 21.44 / 21.20 / 20.33 TMAC/s**. The change improved the measured scan rate by roughly 4–6% in these short runs. A third alternating sequence with GPU power sampling gave baseline **19.48 / 19.59 TMAC/s** at **99.29 / 97.82 W** median active GPU draw, and changed **20.66 / 20.74 TMAC/s** at **101.43 / 101.75 W**. Those samples imply about 3% more GPU-only work per watt, with whole-computer power still unknown. Each scan ran with the Quantus pilot briefly paused; the pilot resumed under its original deadline after every sequence.
+
+A 55-second LuckyPool check of the changed production miner found and submitted **12 shares**, with **12 `result:true` pool responses and no rejected response** in the captured log. The full proof mock and pool replies support the new coordinate path. The short test does not prove a Pearl payout or profitable long-term operation. The local dashboard retains the conservative 22 TH/s planning rate and Quantus pilot while Pearl whole-computer power remains unmeasured.
+
 ## Correctness and remaining work
 
 ### 64-wide K tile on the RTX 5060 Ti

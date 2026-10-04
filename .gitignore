@@ -1,0 +1,12 @@
+/build/
+/rust/cp-proof-ffi/target/
+/third_party/blake3/
+/third_party/cutlass/
+internal/
+build-*.log
+mock-*.log
+*.exe
+*.obj
+*.exp
+pp_dev_*
+pp_prod_*

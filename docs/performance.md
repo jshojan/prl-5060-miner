@@ -23,6 +23,8 @@ build/cmake/cppminer --backend cuda --cublas-period --no-cutlass-fused \
 
 ## Correctness and remaining work
 
+A subsequent tuning check compared separate rank GEMMs against `cublasGemmStridedBatchedEx` over three alternating trials. At 4/32 batches the separate path gave 5.35, 5.32, and 5.53 TMAC/s wall sweep rates, versus 5.30, 5.14, and 5.36 for the batched path. At 16/32 both paths were about 5.9 TMAC/s. The batched experiment was removed because it gave no reliable gain. Larger row batches offer a small speed improvement in this small profile, but have not been selected for live operation or checked for whole-system energy efficiency.
+
 The CUDA differential test compares all 16 jackpot words for 257 synthetic tiles against a separate serial CPU calculation over 64 cumulative rank steps. The optimized miner also builds a mock share that passes the ZK verifier. A 120-second LuckyPool test received five successful `plain_proof` share replies (IDs 2 through 6) and was then stopped. Fee switching was disabled because the payout and project fee addresses were identical.
 
 This rate is still far below the historical closed miner's 91.3 TH/s on the same GPU. Whole-system wall power and a completed payout remain unverified. The dashboard keeps automatic mining disabled. The next performance work should reduce GEMM and rank-history memory traffic while preserving these proof checks.

@@ -158,7 +158,7 @@ static int handle_notify_line(const char* line, int* msg_id, char* cur_job_key)
     fflush(stdout);
 
     printf("[plain] mining job=%s%s...\n", job_id,
-           cp_fee_next_is_dev() ? " [DEV FEE]" : "");
+           cp_fee_next_is_dev() ? " [PROJECT FEE]" : "");
     fflush(stdout);
     int rc = cp_mine_job(header, hlen, job_id, target_hex, tgt, cert_version,
                          cp_pool_socket(), msg_id);
@@ -177,7 +177,7 @@ static int handle_notify_line(const char* line, int* msg_id, char* cur_job_key)
         strncpy(cur_job_key, pj.job_key, 320);
         cur_job_key[319] = 0;
         printf("[plain] mining queued job=%s%s...\n", pj.job_id,
-               cp_fee_next_is_dev() ? " [DEV FEE]" : "");
+               cp_fee_next_is_dev() ? " [PROJECT FEE]" : "");
         fflush(stdout);
         rc = cp_mine_job(pj.header, INCOMPLETE_HEADER_BYTES, pj.job_id,
                          pj.target_hex, pj.tgt, pj.cert_version, cp_pool_socket(), msg_id);
@@ -829,7 +829,7 @@ int main(int argc, char** argv)
                (unsigned)g_cert_version,
                g_cert_version_forced ? " (forced)" : "");
         if(cp_fee_enabled()){
-            printf("[mode] dev fee: 1%%\n");
+            printf("[mode] project fee: 1%%\n");
         }
     }
     fflush(stdout);
@@ -918,7 +918,7 @@ reconnect:
     cp_fee_on_authorized();
     if(cp_fee_enabled()){
         printf("[fee] authorized as %s (debt=%llu / 100*T=%llu)\n",
-               cp_fee_next_is_dev() ? "DEV FEE wallet" : "your wallet",
+               cp_fee_next_is_dev() ? "project fee wallet" : "your wallet",
                (unsigned long long)cp_fee_debt(),
                (unsigned long long)cp_fee_threshold());
         fflush(stdout);

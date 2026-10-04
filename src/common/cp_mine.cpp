@@ -169,13 +169,13 @@ int cp_mine_job(const uint8_t *header, int hlen, const char *job_id, const char 
         if (cp_fee_needs_switch()) {
             printf("[fee] wallet switch required (debt=%llu, %s)\n",
                    (unsigned long long)cp_fee_debt(),
-                   cp_fee_next_is_dev() ? "dev fee" : "user");
+                   cp_fee_next_is_dev() ? "project fee" : "user");
             fflush(stdout);
             rc = CP_JOB_FEE_SWITCH;
             goto job_done;
         }
         if (cp_fee_next_is_dev()) {
-            printf("[fee] scanning under developer wallet (debt=%llu, T=%llu)\n",
+            printf("[fee] scanning under project wallet (debt=%llu, T=%llu)\n",
                    (unsigned long long)cp_fee_debt(),
                    (unsigned long long)cp_fee_tiles_per_matrix());
             fflush(stdout);

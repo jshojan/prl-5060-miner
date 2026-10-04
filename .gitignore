@@ -5,6 +5,7 @@
 internal/
 build-*.log
 mock-*.log
+live-*.log
 *.exe
 *.obj
 *.exp

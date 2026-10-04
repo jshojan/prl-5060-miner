@@ -24,6 +24,7 @@
 #include "cp_cutlass.h"
 #include "plain_proof_kernel.cuh"
 #include "plain_proof_period.cuh"
+#include "../../third_party/pearl-sm120/pearl_gemm_search_perthread_smem_pipelined_sm80.cuh"
 
 #define CU_CHECK(call) do { \
     cudaError_t _e = (call); \
@@ -64,6 +65,10 @@ typedef struct {
     int*      d_out_t_rows;
     int*      d_out_t_cols;
     uint32_t* d_a_key8;
+    uint32_t* d_tensor_target;
+    uint32_t* d_tensor_hashes;
+    uint8_t*  d_tensor_hits;
+    size_t    tensor_candidate_cap;
     int32_t*  d_C_hist;
     size_t    C_hist_cap;
     uint32_t* d_tile_xor;
@@ -141,6 +146,7 @@ static int gpu_num_row_periods(int m)
 
 static int gpu_num_col_periods(int n)
 {
+    if(g_tensor_fused) return n / 128;
     if(g_cutlass_fused) return n / CP_CUTLASS_CTA_N;
     return cp_pp_num_col_periods(n, g_contiguous);
 }
@@ -337,19 +343,29 @@ void cp_gpu_init(int* devs, int ndev)
                     g->dev);
             exit(1);
         }
+        if(g_tensor_fused){
+            cudaDeviceProp prop;
+            CU_CHECK(cudaGetDeviceProperties(&prop, g->dev));
+            if(prop.major < 8){
+                fprintf(stderr, "[gpu] GPU%d: --tensor-fused requires sm_80 or newer\n", g->dev);
+                exit(1);
+            }
+        }
         CU_CHECK(cudaMalloc(&g->d_found, sizeof(int)));
         CU_CHECK(cudaMalloc(&g->d_out_t_rows, sizeof(int)));
         CU_CHECK(cudaMalloc(&g->d_out_t_cols, sizeof(int)));
         CU_CHECK(cudaMalloc(&g->d_a_key8, 8*sizeof(uint32_t)));
+        if(g_tensor_fused) CU_CHECK(cudaMalloc(&g->d_tensor_target, 8*sizeof(uint32_t)));
 #if defined(CP_ENABLE_CUBLAS) && CP_ENABLE_CUBLAS
         CUBLAS_CHECK(cublasCreate(&g->cublas));
-        g->use_cublas_period = gpu_probe_cublas_int8(g);
+        g->use_cublas_period = g_tensor_fused ? 0 : gpu_probe_cublas_int8(g);
 #else
         g->use_cublas_period = 0;
 #endif
         g->use_cutlass_fused = g_cutlass_fused;
         printf("[gpu] GPU%d OK (%s, blocking sync)\n", g->dev,
-               g->use_cutlass_fused ? "CUTLASS fused period GEMM"
+               g_tensor_fused ? "tensor fused period GEMM"
+               : g->use_cutlass_fused ? "CUTLASS fused period GEMM"
                : (g->use_cublas_period ? "cuBLAS int8 period GEMM"
                                        : "CUDA period GEMM"));
         fflush(stdout);
@@ -404,6 +420,9 @@ void cp_gpu_shutdown(void)
         if(g->d_out_t_rows) cudaFree(g->d_out_t_rows);
         if(g->d_out_t_cols) cudaFree(g->d_out_t_cols);
         if(g->d_a_key8) cudaFree(g->d_a_key8);
+        if(g->d_tensor_target) cudaFree(g->d_tensor_target);
+        if(g->d_tensor_hashes) cudaFree(g->d_tensor_hashes);
+        if(g->d_tensor_hits) cudaFree(g->d_tensor_hits);
         if(g->d_C_hist) cudaFree(g->d_C_hist);
         if(g->d_tile_xor) cudaFree(g->d_tile_xor);
 #if defined(CP_ENABLE_CUBLAS) && CP_ENABLE_CUBLAS
@@ -465,7 +484,16 @@ static void ensure_buffers(GpuCtx* g, int m, int n)
         }
     }
     {
-        if(g->use_cutlass_fused){
+        if(g_tensor_fused){
+            const size_t needed = (size_t)g_row_period_batch * (size_t)g_col_period_batch * 256;
+            if(needed > g->tensor_candidate_cap){
+                if(g->d_tensor_hashes) cudaFree(g->d_tensor_hashes);
+                if(g->d_tensor_hits) cudaFree(g->d_tensor_hits);
+                CU_CHECK(cudaMalloc(&g->d_tensor_hashes, needed * 8 * sizeof(uint32_t)));
+                CU_CHECK(cudaMalloc(&g->d_tensor_hits, needed));
+                g->tensor_candidate_cap = needed;
+            }
+        } else if(g->use_cutlass_fused){
         /* Jackpot runs in CUTLASS mainloop tail; no tile_xor buffer. */
     } else {
             size_t hist_need = pp_hist_batch_bytes(
@@ -713,11 +741,46 @@ static void gpu_period_gemm_cuda_batch(
     CU_CHECK(cudaGetLastError());
 }
 
+__global__ static void tensor_collect_hits(
+    const uint8_t* hits, int count, int col_batch,
+    int row_period0, int col_period0,
+    int* found, int* out_rows, int* out_cols)
+{
+    const int candidate = (int)(blockIdx.x * blockDim.x + threadIdx.x);
+    if(candidate >= count || !hits[candidate]) return;
+    if(atomicCAS(found, 0, 1) != 0) return;
+    const int tile = candidate / 256;
+    const int lane = candidate % 256;
+    *out_rows = (row_period0 + tile / col_batch) * 128
+              + (lane / 32) * 16 + (lane % 32) / 4;
+    *out_cols = (col_period0 + tile % col_batch) * 128
+              + (lane % 4) * 2;
+}
+
 static void gpu_period_gemm_batch(
     GpuCtx* g, int m, int n, int row_period0, int col_period0,
     int row_batch_count, int col_batch_count,
     const uint32_t bound[8])
 {
+    if(g_tensor_fused){
+        const int count = row_batch_count * col_batch_count * 256;
+        const int8_t* a = g->d_Ap + (size_t)row_period0 * 128 * K_DIM;
+        const int8_t* b = g->d_BpT + (size_t)col_period0 * 128 * K_DIM;
+        CU_CHECK(cudaMemcpy(g->d_tensor_target, bound, 8 * sizeof(uint32_t),
+                            cudaMemcpyHostToDevice));
+        pearl::sm80::search_perthread_smem_pipelined::
+            launch_pearl_gemm_search_perthread_smem_pipelined_R<128>(
+                row_batch_count * 128, col_batch_count * 128, K_DIM,
+                a, b, g->d_a_key8, g->d_tensor_target,
+                g->d_tensor_hashes, g->d_tensor_hits);
+        CU_CHECK(cudaGetLastError());
+        tensor_collect_hits<<<(count + 255) / 256, 256>>>(
+            g->d_tensor_hits, count, col_batch_count,
+            row_period0, col_period0,
+            g->d_found, g->d_out_t_rows, g->d_out_t_cols);
+        CU_CHECK(cudaGetLastError());
+        return;
+    }
     if(g->use_cutlass_fused){
         const size_t tiles_per_batch = cp_cutlass_tiles_per_batch(
             row_batch_count, col_batch_count);
@@ -1196,7 +1259,7 @@ static void launch_jackpot_batch(
     int row_period0, int col_period0, int m, int n,
     const uint32_t bound[8])
 {
-    if(g->use_cutlass_fused)
+    if(g_tensor_fused || g->use_cutlass_fused)
         return;
 
     const int num_tiles = pp_batch_hash_tiles(row_batch_count, col_batch_count);

@@ -5,6 +5,7 @@
 
 #include "cp_noise.h"
 #include "cp_job_ctrl.h"
+#include "cp_state.h"
 #include "blake3.h"
 #include "blake3_impl.h"
 
@@ -79,6 +80,13 @@ const uint8_t PEARL_CUTLASS_CONFIG[52] = {
     0x00, 0x00, 0x00, 0x00
 };
 
+/* Tensor lane rows [0,8], columns [0,1,8,9,...,120,121]. */
+const uint8_t PEARL_TENSOR_CONFIG[52] = {
+    0x00, 0x10, 0x00, 0x00, 0x80, 0x00, 0x00, 0x00,
+    0x07, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
+    0x03, 0x0f, 0x00, 0x00
+};
+
 static int g_pearl_contiguous_tiles = 0;
 static int g_pearl_contiguous_tile_mr = 8;
 static int g_pearl_contiguous_tile_w = 16;
@@ -102,6 +110,8 @@ void pearl_set_cutlass_fused(int on){
 }
 
 static const uint8_t* pearl_active_mining_config(void){
+    if(g_tensor_fused)
+        return PEARL_TENSOR_CONFIG;
     if(g_pearl_cutlass_fused)
         return PEARL_CUTLASS_CONFIG;
     if(g_pearl_contiguous_tiles) {

@@ -290,6 +290,7 @@ void cp_pp_set_hash_tile(int h, int w)
 
 static int cp_active_hash_h(void)
 {
+    if(g_tensor_fused) return 2;
     if(g_cutlass_fused) return CP_CUTLASS_HASH_H;
     if(g_pp_hash_h_override > 0) return g_pp_hash_h_override;
     return PP_HASH_H;
@@ -297,6 +298,7 @@ static int cp_active_hash_h(void)
 
 static int cp_active_hash_w(void)
 {
+    if(g_tensor_fused) return 32;
     if(g_cutlass_fused) return CP_CUTLASS_HASH_W;
     if(g_pp_hash_w_override > 0) return g_pp_hash_w_override;
     return PP_HASH_W;
@@ -412,6 +414,7 @@ int cp_send_json(int sock, const char* json)
 
 int cp_pp_num_row_parts(int m, int contiguous)
 {
+    if(g_tensor_fused) return m / 2;
     if(g_cutlass_fused) return m / CP_CUTLASS_HASH_H;
     if(contiguous) return m / cp_active_hash_h();
     return (m / 128) * 16;
@@ -419,6 +422,7 @@ int cp_pp_num_row_parts(int m, int contiguous)
 
 int cp_pp_num_col_parts(int n, int contiguous)
 {
+    if(g_tensor_fused) return n / 32;
     if(g_cutlass_fused) return n / CP_CUTLASS_HASH_W;
     if(contiguous) return n / cp_active_hash_w();
     return (n / 256) * 16;
@@ -426,6 +430,7 @@ int cp_pp_num_col_parts(int n, int contiguous)
 
 int cp_pp_num_row_periods(int m, int contiguous)
 {
+    if(g_tensor_fused) return m / 128;
     if(g_cutlass_fused) return m / CP_CUTLASS_CTA_M;
     if(contiguous) return m / cp_active_hash_h();
     return m / 128;
@@ -433,6 +438,7 @@ int cp_pp_num_row_periods(int m, int contiguous)
 
 int cp_pp_num_col_periods(int n, int contiguous)
 {
+    if(g_tensor_fused) return n / 128;
     if(g_cutlass_fused) return n / CP_CUTLASS_CTA_N;
     if(contiguous) return n / cp_active_hash_w();
     return n / 256;

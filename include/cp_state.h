@@ -12,6 +12,7 @@ extern "C" {
 
 extern int g_dev_dims;
 extern int g_cutlass_fused;
+extern int g_tensor_fused;
 extern int g_m_active;
 extern int g_n_active;
 extern char g_workdir[MAX_PATH];

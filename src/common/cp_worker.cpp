@@ -1,6 +1,7 @@
 #include "cp_worker.h"
 #include "cp_noise.h"
 #include "cp_proof.h"
+#include "cp_state.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -389,6 +390,8 @@ extern "C" void cp_worker_begin_job(const uint8_t job_key[32], int m, int n,
 
 extern "C" int cp_worker_default_tile_layout(void)
 {
+    if(cp_worker_backend_id() == CP_BACKEND_CUDA && g_tensor_fused)
+        return CP_TILE_LAYOUT_TENSOR_2x32;
     if(cp_worker_backend_id() == CP_BACKEND_CPU)
         return CP_TILE_LAYOUT_CONTIGUOUS;
 #if defined(CP_ENABLE_OPENCL) && CP_ENABLE_OPENCL

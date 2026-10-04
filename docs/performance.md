@@ -36,7 +36,12 @@ ctest --test-dir build/cmake --output-on-failure
 
 Its 2x32 hash pattern (rows `[0,8]`, columns `[0,1,8,9,...,120,121]`) differs from the current miner's 8x16 pattern. The Rust proof builder now supports layout 5, and independent proof fixtures pass the full ZK verifier for certificate versions 2 and 3 at both interior and boundary anchors. Tests cover all 256 lane anchors, the 262144 target normalization factor, and invalid matrix bounds. The inherited proof fixtures were corrected to use matrix sizes that fit their tiles and valid verification dimensions; the 11-test Rust suite now runs through CTest.
 
-Integration still must connect GPU candidate selection, signal extraction, job configuration, target scaling, and fee work accounting to that pattern, then receive live accepted pool shares. These proof fixtures do not yet verify a share emitted by the fused GPU path. The production miner and dashboard benchmark continue to use the validated 5.5 TH/s path until those gates pass.
+The opt-in `--tensor-fused` mode now connects GPU candidate selection, job configuration, proof metadata, target scaling, and fee work accounting to that pattern. On the 5060 Ti, a dev mock found a candidate at nonce 308; the full in-process ZK verifier accepted its certificate version 3 proof. A short production-dimension LuckyPool run then returned seven successful submit responses (IDs 2–8, all `{"error":null,"result":true}`). This is evidence of pool acceptance; the local mock independently checks the full proof. The median attempt rate across 15 production-size attempts was 12.15 TMAC/s. The mode remains opt-in while longer runs, power draw, and payout behavior are measured.
+
+```bash
+build/cmake/cppminer --backend cuda --tensor-fused \
+  --row-period-batch 4 --col-period-batch 32 --mock --dev
+```
 
 ## Correctness and remaining work
 

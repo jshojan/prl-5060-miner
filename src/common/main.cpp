@@ -77,6 +77,7 @@ static void print_usage(void)
     printf("  --step-major         step-major Ap/BpT panels (lda=%d; cuBLAS period default)\n",
            R_RANK);
     printf("  --cutlass-fused      fused CUTLASS GEMM + jackpot (CUDA default)\n");
+    printf("  --tensor-fused       experimental tensor GEMM + jackpot (CUDA sm_80+)\n");
 #if defined(CP_ENABLE_CUBLAS) && CP_ENABLE_CUBLAS
     printf("  --cublas-period      debug: cuBLAS period GEMM + separate XOR/jackpot\n");
 #endif
@@ -209,6 +210,7 @@ int main(int argc, char** argv)
     int step_major_ap = -1; /* -1 = unset; CUTLASS→row-major, cuBLAS period→step-major */
     /* -1 = unset; CUDA defaults to fused CUTLASS, other backends force off. */
     int cutlass_fused = -1;
+    int tensor_fused = 0;
     CpPrepackMode prepack_mode = CP_PREPACK_SEPARATE;
     CpSimdIsa simd_isa = CP_SIMD_AUTO;
     int simd_env_invalid = 0;
@@ -373,6 +375,8 @@ int main(int argc, char** argv)
             step_major_ap = 1;
         } else if(!strcmp(argv[i], "--cutlass-fused")){
             cutlass_fused = 1;
+        } else if(!strcmp(argv[i], "--tensor-fused")){
+            tensor_fused = 1;
         } else if(!strcmp(argv[i], "--cublas-period")){
 #if defined(CP_ENABLE_CUBLAS) && CP_ENABLE_CUBLAS
             cutlass_fused = 0;
@@ -530,6 +534,16 @@ int main(int argc, char** argv)
         cp_worker_set_ocl_lds(1);
 #endif
 
+    if(tensor_fused){
+        if(cp_worker_backend_id() != CP_BACKEND_CUDA || step_major_ap == 1 ||
+           cutlass_fused == 1 || no_period_gemm || align_test || align_test_prod || profile_scan){
+            fprintf(stderr, "--tensor-fused requires CUDA period GEMM and row-major panels; alignment/profile modes are unsupported\n");
+            return 1;
+        }
+        g_tensor_fused = 1;
+        cutlass_fused = 0;
+        step_major_ap = 0;
+    }
     if(cp_worker_backend_id() == CP_BACKEND_CUDA){
         if(cutlass_fused < 0) cutlass_fused = 1;
     } else {
@@ -742,7 +756,8 @@ int main(int argc, char** argv)
         int row_parts = cp_pp_num_row_parts(g_m_active, contiguous);
         int col_parts = cp_pp_num_col_parts(g_n_active, contiguous);
         const char *tile_layout_name =
-            cutlass_fused ? "CUTLASS MMA lane 8x8 interleaved (128x128 CTA)"
+            tensor_fused ? "tensor MMA lane 2x32 (128x128 CTA)"
+            : cutlass_fused ? "CUTLASS MMA lane 8x8 interleaved (128x128 CTA)"
             : (tile_layout == CP_TILE_LAYOUT_CONTIGUOUS_4x8) ? "contiguous 4x8 blocks"
             : (tile_layout == CP_TILE_LAYOUT_CONTIGUOUS_8x8) ? "contiguous 8x8 blocks"
             : (tile_layout == CP_TILE_LAYOUT_CONTIGUOUS) ? "contiguous 8x16 blocks"
@@ -773,7 +788,10 @@ int main(int argc, char** argv)
                    period_batch, period_batch * tiles_per_macro);
             printf("[mode] host signal ~%.0f MiB; noisy B cached on GPU per job\n", host_mib);
         } else if(cp_worker_backend_id() == CP_BACKEND_CUDA){
-            if(cutlass_fused){
+            if(tensor_fused){
+                printf("[mode] proof rows/cols: 2 A + 32 B^T\n");
+                printf("[mode] scan: fused tensor GEMM + inline jackpot\n");
+            } else if(cutlass_fused){
                 printf("[mode] proof rows/cols: 8 A + 8 B^T (interleaved 4x4)\n");
                 printf("[mode] scan: CUTLASS Case 10 fused GEMM + inline XOR jackpot\n");
             } else {
@@ -800,7 +818,10 @@ int main(int argc, char** argv)
             printf("[mode] Ap/BpT layout: %s (lda=%d)\n",
                    step_major_ap ? "step-major panels" : "row-major strided",
                    step_major_ap ? R_RANK : K_DIM);
-            if(cutlass_fused){
+            if(tensor_fused){
+                printf("[mode] jackpot: fused in tensor GEMM (no C_hist)\n");
+                printf("[mode] period batch: row=%d col=%d\n", row_period_batch, period_batch);
+            } else if(cutlass_fused){
                 printf("[mode] jackpot: fused in GEMM kernel (no tile_xor / C_hist)\n");
                 printf("[mode] period batch: row=%d col=%d\n",
                        row_period_batch, period_batch);
